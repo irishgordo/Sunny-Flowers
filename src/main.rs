@@ -43,7 +43,14 @@ use tracing::{event, Level};
     stop,
     swap,
     now_playing,
-    queue
+    queue,
+    get_group_items,
+    add_group_item,
+    delete_group_item,
+    stat_me,
+    get_month_info,
+    get_all_group_events,
+    add_group_event
 )]
 struct General;
 

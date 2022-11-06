@@ -1,4 +1,4 @@
-use std::{collections::HashSet, num::NonZeroUsize};
+use std::{env, collections::HashSet, num::NonZeroUsize, fmt, fmt::format, str::FromStr};
 
 use serenity::{
     client::Context,
@@ -19,8 +19,46 @@ use crate::{
         queue::{self, EnqueueAt},
     },
     structs::EventConfig,
-    utils::SunnyError,
+    utils::SunnyError
 };
+
+
+use tokio_postgres::{NoTls, Error, Config, types::ToSql};
+use futures_util::{pin_mut, TryStreamExt};
+use tracing::{event, Level};
+use sysinfo::{NetworkExt, NetworksExt, ProcessExt, System, SystemExt};
+
+struct TimelineEvent {
+    id: i32,
+    day: i32,
+    month: String,
+    event: String, 
+    year: String,
+    logged_by: String
+}
+
+impl fmt::Display for TimelineEvent {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "*id:* {} | *day:* {} | *month:* {} | *event:* {} | *year:* {} | *logged_by:* {}", self.id, self.day, self.month, self.event, self.year, self.logged_by)
+    }
+}
+
+
+struct GroupItem {
+    id: i32,
+    name: String,
+    description: String,
+    quantity: i32,
+    url: String
+}
+
+impl fmt::Display for GroupItem {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "*id:* {} | *name:* {} | *description:* {} | *quantity:* {} | *url:* {}", self.id, self.name, self.description, self.quantity, self.url)
+    }
+}
+
+
 
 #[help]
 pub async fn help(
@@ -340,5 +378,414 @@ pub async fn remove_at(ctx: &Context, msg: &Message, mut args: Args) -> CommandR
 /// Pong
 pub async fn ping(ctx: &Context, msg: &Message) -> CommandResult {
     msg.channel_id.say(&ctx.http, "Pong!").await?;
+    Ok(())
+}
+
+fn get_db_pw() -> String {
+    event!(Level::INFO, "Attempting to find database pw..");
+    let db_pw = env::var("DB_PW").expect("Environment variable DB_PW not found");
+    return db_pw
+}
+
+fn slice_iter<'a>(
+    s: &'a [&'a (dyn ToSql + Sync)],
+) -> impl ExactSizeIterator<Item = &'a dyn ToSql> + 'a {
+    s.iter().map(|s| *s as _)
+}
+
+#[command]
+#[description = "get all the current group items from the group items database"]
+#[only_in(guilds)]
+/// return group items
+pub async fn get_group_items(ctx: &Context, msg: &Message) -> CommandResult {
+    // Connect to the database.
+    event!(Level::INFO, "Attempting to connect to db...");
+
+    msg.channel_id.say(&ctx.http, ":race_car: ...connecting to database to fetch group_items...").await?;
+
+    let (client, connection) = Config::new()
+    .host("localhost")
+    .user("sunny")
+    .port(5432)
+    .password(get_db_pw())
+    .dbname("farflungfellowship")
+    .connect(NoTls)
+    .await
+    .unwrap();
+    
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+    event!(Level::INFO, "Connected to db...");
+    msg.channel_id.say(&ctx.http, ":thumbsup: ...database connected for fetching group_items...").await?;
+
+    let mut it = client
+        .query_raw("SELECT id, name, quantity, description, url FROM group_items", slice_iter(&[]))
+        .await?;
+
+    msg.channel_id.say(&ctx.http, "- starting, fetch of group_items... :white_check_mark: -").await?;        
+    pin_mut!(it);
+    while let Some(row) = it.try_next().await? {
+        let item = GroupItem{
+            id: row.get("id"),
+            name: row.get("name"),
+            description: row.get("description"),
+            quantity: row.get("quantity"),
+            url: row.get("url")
+            
+        };
+        msg.channel_id.say(&ctx.http, "- :sparkles: -").await?;        
+        msg.channel_id.say(&ctx.http, item.to_string()).await?;
+        msg.channel_id.say(&ctx.http, "- :sparkles: -").await?;        
+    }
+    msg.channel_id.say(&ctx.http, ":checkered_flag: finished, fetch of group_items...").await?;        
+
+    Ok(())
+}
+
+#[command]
+#[description = "add an group item to the group item database"]
+#[only_in(guilds)]
+#[min_args(1)]
+#[max_args(4)]
+#[usage("<name> | <description> | <quantity> | <url>")]
+#[example("bucket | a regular bucket made of wood | 3")]
+#[delimiters(" | ")]
+/// Swaps two songs in the queue by their number
+pub async fn add_group_item(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    msg.channel_id.say(&ctx.http, ":race_car: ..starting add_group_item, must have at least a name for item").await?;        
+
+    let name = args
+        .single::<String>()
+        .map_err(|_| SunnyError::user("need a name for the item"))?;
+
+    let description = args
+        .single::<String>().unwrap_or_default();
+
+    let temp_quantity = args.single::<String>().unwrap_or_default();
+
+    let result_quantity = i32::from_str(&temp_quantity).unwrap_or(1);
+
+    let url = args.single::<String>().unwrap_or_default(); 
+
+    let to_be_added_msg = format!(":fork_and_knife: ...preparing to add: {} - {} - {} - {}", name, description, result_quantity.to_string(), url);
+
+    msg.channel_id.say(&ctx.http, to_be_added_msg).await?;
+    
+    event!(Level::INFO, "Attempting to connect to db...");
+
+    msg.channel_id.say(&ctx.http, ":alarm_clock: ...connecting to database to fetch add_group_item...").await?;
+
+    let (client, connection) = Config::new()
+    .host("localhost")
+    .user("sunny")
+    .port(5432)
+    .password(get_db_pw())
+    .dbname("farflungfellowship")
+    .connect(NoTls)
+    .await
+    .unwrap();
+    
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+    event!(Level::INFO, "Connected to db...");
+    msg.channel_id.say(&ctx.http, ":thumbsup: ...database connected for adding group_items...").await?;
+
+    let item_name = name.trim();
+    let item_description = description.trim();
+    let item_url = url.trim();
+
+    let mut _it = client
+        .query("insert into public.group_items (name, description, url, quantity) values($1, $2, $3, $4)", &[&item_name, &item_description, &item_url, &result_quantity])
+        .await?;
+
+    msg.channel_id.say(&ctx.http, ":thumbsup: added item :toolbox: successfully :star:").await?;
+
+
+    Ok(())
+}
+
+
+#[command]
+#[description = "delete a group item from the database"]
+#[only_in(guilds)]
+#[min_args(1)]
+#[max_args(1)]
+#[usage("1")]
+#[example("123")]
+/// Swaps two songs in the queue by their number
+pub async fn delete_group_item(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    msg.channel_id.say(&ctx.http, ":race_car: ..starting delete_group_item, must have the id for the item").await?;        
+
+    let item_id = args
+        .single::<String>()
+        .map_err(|_| SunnyError::user("need a id for the item"))?;
+    
+    event!(Level::INFO, "Attempting to connect to db...");
+    let db_item_id_sanitize = item_id.trim();
+    let db_item = i32::from_str(&db_item_id_sanitize).unwrap_or(1);
+    msg.channel_id.say(&ctx.http, ":alarm_clock: ...connecting to database to delete the group item...").await?;
+
+    let (client, connection) = Config::new()
+    .host("localhost")
+    .user("sunny")
+    .port(5432)
+    .password(get_db_pw())
+    .dbname("farflungfellowship")
+    .connect(NoTls)
+    .await
+    .unwrap();
+    
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+    event!(Level::INFO, "Connected to db...");
+    msg.channel_id.say(&ctx.http, ":thumbsup: ...database connected for deleting a group item...").await?;
+
+    let mut _it = client
+        .query("delete from public.group_items where id=$1", &[&db_item])
+        .await?;
+
+    msg.channel_id.say(&ctx.http, ":thumbsup: deleted item :toolbox: successfully :star:").await?;
+
+
+    Ok(())
+}
+
+#[command]
+#[only_in(guilds)]
+/// STATS
+pub async fn stat_me(ctx: &Context, msg: &Message) -> CommandResult {
+    // Please note that we use "new_all" to ensure that all list of
+    // components, network interfaces, disks and users are already
+    // filled!
+    msg.channel_id.say(&ctx.http, ":race_car: - starting stat info! be patient! ...").await?;
+
+    let mut sys = System::new_all();
+
+    // First we update all information of our `System` struct.
+    sys.refresh_all();
+
+    // We display all disks' information:
+    msg.channel_id.say(&ctx.http, "=> disks:").await?;
+    for disk in sys.disks() {
+        let diskfound = format!("{:?}", disk);
+        msg.channel_id.say(&ctx.http, diskfound).await?;
+    }
+
+    // Network interfaces name, data received and data transmitted:
+    msg.channel_id.say(&ctx.http, "=> networks:").await?;
+    for (interface_name, data) in sys.networks() {
+        let intf = format!("{}: {}/{} B", interface_name, data.received(), data.transmitted());
+        msg.channel_id.say(&ctx.http, intf).await?;
+    }
+
+    // Components temperature:
+    msg.channel_id.say(&ctx.http, "=> components:").await?;
+    for component in sys.components() {
+        let cpt = format!("{:?}", component);
+        msg.channel_id.say(&ctx.http, cpt).await?;
+    }
+
+    msg.channel_id.say(&ctx.http, "=> system:").await?;
+    // RAM and swap information:
+    let totalmem = format!("total memory: {} bytes", sys.total_memory());
+    let usedmem = format!("used memory : {} bytes", sys.used_memory());
+    let totalswap = format!("total swap  : {} bytes", sys.total_swap());
+    let usedswap = format!("used swap   : {} bytes", sys.used_swap());
+
+    // Display system information:
+    let sysname = format!("System name:             {:?}", sys.name());
+    let syskern = format!("System kernel version:   {:?}", sys.kernel_version());
+    let sysos = format!("System OS version:       {:?}", sys.os_version());
+    let syshostname = format!("System host name:        {:?}", sys.host_name());
+
+    // Number of CPUs:
+    let numcpus = format!("NB CPUs: {}", sys.cpus().len());
+
+    // msg discord chunk
+    msg.channel_id.say(&ctx.http, totalmem).await?;
+    msg.channel_id.say(&ctx.http, usedmem).await?;
+    msg.channel_id.say(&ctx.http, totalswap).await?;
+    msg.channel_id.say(&ctx.http, usedswap).await?;
+    msg.channel_id.say(&ctx.http, sysname).await?;
+    msg.channel_id.say(&ctx.http, syskern).await?;
+    msg.channel_id.say(&ctx.http, sysos).await?;
+    msg.channel_id.say(&ctx.http, syshostname).await?;
+    msg.channel_id.say(&ctx.http, numcpus).await?;
+
+    msg.channel_id.say(&ctx.http, ":checkered_flag: FINISHED STAT :sparkles:").await?;
+    Ok(())
+}
+
+
+#[command]
+#[only_in(guilds)]
+/// month info stuff
+pub async fn get_month_info(ctx: &Context, msg: &Message) -> CommandResult {
+    msg.channel_id.say(&ctx.http, ":sparkles: month info!").await?;
+    msg.channel_id.say(&ctx.http, "(1) Hammer - Common-Name: Deepwinter - Holiday: Midwinter").await?;
+    msg.channel_id.say(&ctx.http, "(2) Alturiak - Common-Name: The Claw of Winter - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, "(3) Ches - Common-Name: The Claw of the Sunsets - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, "(4) Tarsakh - Common-Name: The Claw of the Storms - Holiday: Greengrass").await?;
+    msg.channel_id.say(&ctx.http, "(5) Mirtul - Common-Name: The Melting - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, "(6) Kythorn - Common-Name: The Time of Flowers - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, "(7) Flamerule - Common-Name: Summertide - Holiday: Midsummer").await?;
+    msg.channel_id.say(&ctx.http, "(8) Eleasis - Common-Name: Highsun - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, "(9) Eleint - Common-Name: The Fading - Holiday: Highharvestide").await?;
+    msg.channel_id.say(&ctx.http, "(10) Marpenoth - Common-Name: Leaffall - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, "(11) Uktar - Common-Name: The Rotting - Holiday: The Feast of the Moon").await?;
+    msg.channel_id.say(&ctx.http, "(12) Nightal - Common-Name: The Drawing Down - Holiday: N/A").await?;
+    msg.channel_id.say(&ctx.http, ":checkered_flag: month info!").await?;
+    Ok(())
+}
+
+
+#[command]
+#[description = "get all the current group events from the database"]
+#[only_in(guilds)]
+/// return group items
+pub async fn get_all_group_events(ctx: &Context, msg: &Message) -> CommandResult {
+    // Connect to the database.
+    event!(Level::INFO, "Attempting to connect to db...");
+
+    msg.channel_id.say(&ctx.http, ":race_car: ...connecting to database to fetch timeline_events...").await?;
+
+    let (client, connection) = Config::new()
+    .host("localhost")
+    .user("sunny")
+    .port(5432)
+    .password(get_db_pw())
+    .dbname("farflungfellowship")
+    .connect(NoTls)
+    .await
+    .unwrap();
+    
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+    event!(Level::INFO, "Connected to db...");
+    msg.channel_id.say(&ctx.http, ":thumbsup: ...database connected for fetching timeline_events...").await?;
+
+    let mut it = client
+        .query_raw("SELECT id, day, month, event, year, logged_by FROM timeline_events", slice_iter(&[]))
+        .await?;
+
+    msg.channel_id.say(&ctx.http, "- starting, fetch of timeline_events... :white_check_mark: -").await?;        
+    pin_mut!(it);
+    while let Some(row) = it.try_next().await? {
+        let event = TimelineEvent{
+            id: row.get("id"),
+            day: row.get("day"),
+            month: row.get("month"),
+            event: row.get("event"),
+            year: row.get("year"),
+            logged_by: row.get("logged_by")
+        };
+        msg.channel_id.say(&ctx.http, "- :bookmark_tabs: -").await?;        
+        msg.channel_id.say(&ctx.http, event.to_string()).await?;
+        msg.channel_id.say(&ctx.http, "- :bookmark_tabs: -").await?;        
+    }
+    msg.channel_id.say(&ctx.http, ":checkered_flag: finished, fetch of timeline_events...").await?;        
+
+    Ok(())
+}
+
+#[command]
+#[description = "add a group event"]
+#[only_in(guilds)]
+#[min_args(3)]
+#[max_args(5)]
+#[usage("<event> | <logged_by> | <month> | <day> | <year>")]
+#[example("it's hammertime cause its hammer time | odo | Hammer | 1 | 1494 DR")]
+#[delimiters(" | ")]
+/// Swaps two songs in the queue by their number
+pub async fn add_group_event(ctx: &Context, msg: &Message, mut args: Args) -> CommandResult {
+    msg.channel_id.say(&ctx.http, ":race_car: ..starting add group event, must have at least a blurb about the event & who logged it, as in you & the month cross-ref months, they're propper nouned").await?;        
+
+    let event = args
+        .single::<String>()
+        .map_err(|_| SunnyError::user("need an event blurb for the event"))?;
+
+    let logged_by = args
+        .single::<String>()
+        .map_err(|_| SunnyError::user("need who logged this..."))?;
+
+    let month = args
+        .single::<String>()
+        .map_err(|_| SunnyError::user("need what month this is"))?;
+
+    let day_unchecked = args.single::<String>().unwrap_or_default();
+
+    let result_day = i32::from_str(&day_unchecked).unwrap_or(0);
+
+    let year = args.single::<String>().unwrap_or_default(); 
+
+    let to_be_added_msg = format!(":fork_and_knife: ...preparing to event: {} - {} - {} - {} - {}", event, logged_by, month, result_day.to_string(), year);
+
+    msg.channel_id.say(&ctx.http, to_be_added_msg).await?;
+    
+    event!(Level::INFO, "Attempting to connect to db...");
+
+    msg.channel_id.say(&ctx.http, ":alarm_clock: ...connecting to database for timeline events...").await?;
+
+    let (client, connection) = Config::new()
+    .host("localhost")
+    .user("sunny")
+    .port(5432)
+    .password(get_db_pw())
+    .dbname("farflungfellowship")
+    .connect(NoTls)
+    .await
+    .unwrap();
+    
+    // The connection object performs the actual communication with the database,
+    // so spawn it off to run on its own.
+    tokio::spawn(async move {
+        if let Err(e) = connection.await {
+            eprintln!("connection error: {}", e);
+        }
+    });
+    event!(Level::INFO, "Connected to db...");
+    msg.channel_id.say(&ctx.http, ":thumbsup: ...database connected for adding timeline events...").await?;
+
+    let db_event = event.trim();
+    let db_logged_by = logged_by.trim();
+    let db_month = month.trim();
+    let db_day = result_day;
+    let db_year = year.trim();
+
+    // TODO: wut... this is so gross we have to do this... ugh... its nearly 11PM screw it for now
+    // let first_pass_month = month.trim().to_lowercase();
+    // let mut second_pass_month: Vec<char> = first_pass_month.chars().collect();
+    // second_pass_month[0] = second_pass_month[0].to_uppercase().nth(0).unwrap();
+    // let third_pass_month: String = second_pass_month.into_iter().collect();
+    // let db_month = &third_pass_month;
+
+
+    let mut _it = client
+        .query("insert into public.timeline_events (event, logged_by, month, day, year) values($1, $2, $3, $4, $5)", &[&db_event, &db_logged_by, &db_month, &db_day, &db_year])
+        .await?;
+
+    msg.channel_id.say(&ctx.http, ":thumbsup: added event :toolbox: successfully :star:").await?;
+
+
     Ok(())
 }

@@ -15,8 +15,8 @@ pub struct Handler;
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, _ready: Ready) {
         let activity = Activity::streaming(
-            "\u{1f4fb} Tropico News Today \u{1f9e8}",
-            "https://www.youtube.com/watch?v=BmKMrUMS9lg",
+            ":sparkles: ROLL FOR INITIATIVE! :sparkles:",
+            "https://youtu.be/2D-ZO2rGcSA",
         );
 
         let status = OnlineStatus::DoNotDisturb;
